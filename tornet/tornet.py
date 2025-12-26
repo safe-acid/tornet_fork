@@ -3,7 +3,10 @@
 #
 # tornet - Automate IP address changes using Tor
 # Author: Fidal
-# Copyright (c) 2024 Fidal. All rights reserved.
+# Copyright (c) 2024 Fidal.
+#
+# Fork patch: Prefer RU exit nodes first; if RU exits are unavailable,
+# fall back to other countries (or any exit) automatically by editing torrc.
 
 import os
 import sys
@@ -30,10 +33,10 @@ def print_banner():
 {green}
 ████████╗ ██████╗ ██████╗ ███╗   ██╗███████╗████████╗
 ╚══██╔══╝██╔═══██╗██╔══██╗████╗  ██║██╔════╝╚══██╔══╝
-   ██║   ██║   ██║██████╔╝██╔██╗ ██║█████╗     ██║   
-   ██║   ██║   ██║██╔══██╗██║╚██╗██║██╔══╝     ██║   
-   ██║   ╚██████╔╝██║  ██║██║ ╚████║███████╗   ██║   
-   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝   
+   ██║   ██║   ██║██████╔╝██╔██╗ ██║█████╗     ██║
+   ██║   ██║   ██║██╔══██╗██║╚██╗██║██╔══╝     ██║
+   ██║   ╚██████╔╝██║  ██║██║ ╚████║███████╗   ██║
+   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝
 {white}                    Version: {VERSION}
 {white} +---------------------{cyan}({red}ByteBreach{cyan}){white}----------------------+{reset}
 {white} +--------------{cyan}({red}Improved by Ayad Seghiri{cyan}){white}--------------------+{reset}
@@ -68,7 +71,7 @@ def run_cmd(cmd, use_sudo=False, check=True):
         if not has_sudo():
             error("Root privileges required but sudo not available. Run as root or install sudo.", 2)
         cmd = ["sudo"] + cmd
-    
+
     try:
         result = subprocess.run(cmd, check=check, capture_output=True, text=True)
         return result
@@ -88,29 +91,42 @@ def detect_service_manager():
 def service_action(action):
     """Perform service action (start/stop/reload) on tor"""
     service_mgr = detect_service_manager()
-    
+
     if service_mgr == "systemctl":
         cmd = ["systemctl", action, "tor"]
     elif service_mgr == "service":
         cmd = ["service", "tor", action]
     else:
         error("No supported service manager found (systemctl or service)", 3)
-    
+
     result = run_cmd(cmd, use_sudo=True, check=False)
     if result.returncode != 0:
         warning(f"Failed to {action} tor service: {result.stderr.strip()}")
+
+def restart_tor_service():
+    """Restart tor so torrc changes take effect."""
+    service_mgr = detect_service_manager()
+    if service_mgr == "systemctl":
+        result = run_cmd(["systemctl", "restart", "tor"], use_sudo=True, check=False)
+    elif service_mgr == "service":
+        result = run_cmd(["service", "tor", "restart"], use_sudo=True, check=False)
+    else:
+        error("No supported service manager found (systemctl or service)", 3)
+
+    if getattr(result, "returncode", 1) != 0:
+        warning(f"Failed to restart tor service: {getattr(result, 'stderr', '').strip()}")
 
 def detect_package_manager():
     """Detect available package manager"""
     managers = [
         ("apt", ["apt-get"]),
         ("dnf", ["dnf"]),
-        ("yum", ["yum"]), 
+        ("yum", ["yum"]),
         ("pacman", ["pacman"]),
         ("apk", ["apk"]),
         ("zypper", ["zypper"])
     ]
-    
+
     for pm, binaries in managers:
         if any(shutil.which(binary) for binary in binaries):
             return pm
@@ -121,7 +137,7 @@ def install_package(package_name):
     pm = detect_package_manager()
     if not pm:
         error("No supported package manager found. Please install packages manually.", 4)
-    
+
     if pm == "apt":
         run_cmd(["apt-get", "update"], use_sudo=True)
         run_cmd(["apt-get", "install", "-y", package_name], use_sudo=True)
@@ -143,14 +159,14 @@ def ensure_pip():
         return True
     except subprocess.CalledProcessError:
         log("pip not found, attempting to install...")
-        
+
         # Try ensurepip first
         try:
             run_cmd([sys.executable, "-m", "ensurepip", "--upgrade"])
             return True
-        except:
+        except Exception:
             pass
-        
+
         # Try system package manager
         try:
             pm = detect_package_manager()
@@ -165,13 +181,13 @@ def ensure_pip():
             elif pm == "zypper":
                 install_package("python3-pip")
             return True
-        except:
+        except Exception:
             error("Failed to install pip. Please install pip manually.", 5)
 
 def ensure_requests():
     """Ensure requests package is available"""
     try:
-        import requests
+        import requests  # noqa: F401
         return True
     except ImportError:
         log("requests package not found, installing...")
@@ -179,7 +195,7 @@ def ensure_requests():
         try:
             run_cmd([sys.executable, "-m", "pip", "install", "requests", "requests[socks]"])
             return True
-        except:
+        except Exception:
             error("Failed to install requests package.", 6)
 
 def is_tor_installed():
@@ -190,12 +206,12 @@ def ensure_tor():
     """Ensure tor is installed"""
     if is_tor_installed():
         return True
-    
+
     log("tor not found, installing...")
     try:
         install_package("tor")
         return True
-    except:
+    except Exception:
         error("Failed to install tor. Please install tor manually.", 7)
 
 def is_tor_running():
@@ -206,7 +222,7 @@ def is_tor_running():
             return True
         except subprocess.CalledProcessError:
             return False
-    
+
     # Fallback: check /proc
     try:
         for pid in os.listdir("/proc"):
@@ -215,11 +231,11 @@ def is_tor_running():
                     with open(f"/proc/{pid}/comm", "r") as f:
                         if f.read().strip() == "tor":
                             return True
-                except:
+                except Exception:
                     continue
-    except:
+    except Exception:
         pass
-    
+
     return False
 
 def get_current_ip():
@@ -237,7 +253,7 @@ def get_ip_via_tor():
         'https': 'socks5://127.0.0.1:9050'
     }
     try:
-        response = requests.get(url, proxies=proxies, timeout=10)
+        response = requests.get(url, proxies=proxies, timeout=15)
         response.raise_for_status()
         return response.text.strip()
     except requests.RequestException:
@@ -262,7 +278,7 @@ def change_ip():
 
 def print_ip(ip):
     """Print current IP address"""
-    log(f"Your IP address is: {white}{ip}")
+    log(f"Your IP address is: {white}{ip}{reset}")
 
 def change_ip_repeatedly(interval_str, count):
     """Change IP repeatedly with specified interval and count"""
@@ -311,7 +327,7 @@ def stop_services():
     service_action("stop")
     try:
         subprocess.run(["pkill", "-f", TOOL_NAME], check=False, capture_output=True)
-    except:
+    except Exception:
         pass
     log(f"Tor services and {TOOL_NAME} processes stopped.")
 
@@ -324,7 +340,7 @@ def signal_handler(sig, frame):
 def check_internet_connection():
     """Check if internet connection is available"""
     try:
-        response = requests.get('http://www.google.com', timeout=5)
+        requests.get('http://www.google.com', timeout=5)
         return True
     except requests.RequestException:
         error("Internet connection required but not available.", 9)
@@ -335,19 +351,125 @@ def initialize_environment():
     log("Tor service started. Please wait for Tor to establish connection.")
     log("Configure your browser to use Tor proxy (127.0.0.1:9050) for anonymity.")
 
+# -----------------------------
+# Tor exit-country preference
+# -----------------------------
+
+def detect_torrc_path(custom: str = ""):
+    """Try to locate torrc in common distro paths."""
+    if custom and os.path.isfile(custom):
+        return custom
+
+    candidates = [
+        "/etc/tor/torrc",                 # Debian/Ubuntu, many distros
+        "/etc/tor/torrc.default",         # some setups
+        "/usr/local/etc/tor/torrc",       # custom installs
+        "/etc/torrc",                     # rare/legacy
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+def set_tor_exit_policy(torrc_path: str, exit_nodes: str, strict: bool):
+    """
+    Update torrc with ExitNodes + StrictNodes.
+    exit_nodes examples:
+      "{ru}" or "{ru},{de},{nl}" or "" (empty = no ExitNodes line)
+    """
+    if not torrc_path:
+        error("torrc file not found. Use --torrc /path/to/torrc", 20)
+
+    try:
+        with open(torrc_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception as e:
+        error(f"Failed to read torrc: {e}", 22)
+
+    def is_policy_line(s: str) -> bool:
+        s2 = s.strip()
+        return s2.startswith("ExitNodes") or s2.startswith("StrictNodes")
+
+    # Remove existing policy lines to avoid duplicates.
+    new_lines = [ln for ln in lines if not is_policy_line(ln)]
+
+    # Append our policy at the end for predictability.
+    new_lines.append("\n# --- tornet exit policy ---\n")
+    if exit_nodes.strip():
+        new_lines.append(f"ExitNodes {exit_nodes.strip()}\n")
+    new_lines.append(f"StrictNodes {'1' if strict else '0'}\n")
+
+    try:
+        with open(torrc_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        error(f"Failed to write torrc: {e}", 23)
+
+def apply_prefer_ru_then_fallback(torrc_path: str, fallback_exits: str):
+    """
+    1) Try strict RU-only exits.
+    2) If Tor doesn't come up (no IP via Tor), fall back to:
+       - any exits (if fallback_exits == "any" or empty)
+       - or a soft preference list (StrictNodes 0) for provided countries.
+    """
+    log("Trying STRICT Russia-only Tor exits (ExitNodes {ru}, StrictNodes 1)...")
+    set_tor_exit_policy(torrc_path, "{ru}", strict=True)
+    restart_tor_service()
+
+    # Give Tor time to bootstrap after restart
+    time.sleep(6)
+    ip = get_ip_via_tor()
+    if ip:
+        log(f"Tor is up with RU exit (if available). Current Tor IP: {white}{ip}{reset}")
+        return
+
+    warning("RU-only exits not available (Tor didn't establish). Falling back...")
+    fb = (fallback_exits or "").strip().lower()
+
+    if fb == "any" or fb == "":
+        # Allow any exit node.
+        set_tor_exit_policy(torrc_path, "", strict=False)
+    else:
+        # Prefer specific countries, but do NOT force strictness (Tor may choose others if needed).
+        countries = [c.strip().lower() for c in fb.split(",") if c.strip()]
+        exit_nodes = ",".join([f"{{{c}}}" for c in countries])
+        set_tor_exit_policy(torrc_path, exit_nodes, strict=False)
+
+    restart_tor_service()
+    time.sleep(6)
+    ip2 = get_ip_via_tor()
+    if ip2:
+        log(f"Tor is up after fallback. Current Tor IP: {white}{ip2}{reset}")
+    else:
+        warning("Fallback also failed to establish Tor connectivity (Tor may be blocked).")
+
 def main():
     """Main function"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGQUIT, signal_handler)
 
     parser = argparse.ArgumentParser(description="TorNet - Automate IP address changes using Tor")
-    parser.add_argument('--interval', type=str, default='60', help='Time in seconds between IP changes (or range like "30-120")')
-    parser.add_argument('--count', type=int, default=10, help='Number of times to change IP. If 0, change IP indefinitely')
-    parser.add_argument('--ip', action='store_true', help='Display current IP address and exit')
-    parser.add_argument('--auto-fix', action='store_true', help='Automatically install missing dependencies')
-    parser.add_argument('--stop', action='store_true', help='Stop all Tor services and tornet processes')
-    parser.add_argument('--version', action='version', version=f'%(prog)s {VERSION}')
-    
+    parser.add_argument('--interval', type=str, default='60',
+                        help='Time in seconds between IP changes (or range like "30-120")')
+    parser.add_argument('--count', type=int, default=10,
+                        help='Number of times to change IP. If 0, change IP indefinitely')
+    parser.add_argument('--ip', action='store_true',
+                        help='Display current IP address and exit')
+    parser.add_argument('--auto-fix', action='store_true',
+                        help='Automatically install missing dependencies')
+    parser.add_argument('--stop', action='store_true',
+                        help='Stop all Tor services and tornet processes')
+    parser.add_argument('--version', action='version',
+                        version=f'%(prog)s {VERSION}')
+
+    # New: prefer RU then fallback
+    parser.add_argument('--prefer-ru', action='store_true',
+                        help='Try Russia (RU) exit nodes first; if unavailable, fallback automatically')
+    parser.add_argument('--fallback-exits', type=str, default='de,nl,fr,pl,se,fi,lt,lv,ee',
+                        help='Comma-separated fallback country codes. Use "any" to allow any exit country.')
+    parser.add_argument('--torrc', type=str, default='',
+                        help='Path to torrc (default: auto-detect common locations)')
+
     args = parser.parse_args()
 
     if args.stop:
@@ -369,17 +491,24 @@ def main():
         error("Tor is not installed. Run with --auto-fix to install automatically.", 10)
 
     try:
-        import requests
+        import requests  # noqa: F401
     except ImportError:
         error("requests package not found. Run with --auto-fix to install automatically.", 11)
 
     check_internet_connection()
     print_banner()
+
+    # Apply RU-first policy before starting Tor (edits torrc + restarts tor)
+    if args.prefer_ru:
+        torrc_path = detect_torrc_path(args.torrc)
+        log(f"Using torrc: {torrc_path}")
+        apply_prefer_ru_then_fallback(torrc_path, args.fallback_exits)
+
     initialize_environment()
-    
+
     # Wait for tor to establish connection
     time.sleep(5)
-    
+
     change_ip_repeatedly(args.interval, args.count)
 
 if __name__ == "__main__":
