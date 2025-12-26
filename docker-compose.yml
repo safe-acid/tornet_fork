@@ -9,7 +9,8 @@ services:
     restart: unless-stopped
     volumes:
       - tor-data:/var/lib/tor
-    command: ["python3", "/app/tornet.py", "--interval", "60", "--count", "0", "--prefer-ru", "--fallback-exits", "any"]
+    working_dir: /app
+    command: ["python3", "tornet/tornet.py", "--interval", "60", "--count", "0", "--prefer-ru", "--fallback-exits", "any"]
     logging:
       driver: "json-file"
       options:
